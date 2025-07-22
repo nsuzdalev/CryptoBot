@@ -25,7 +25,8 @@ def fetch_market_data():
     params = {"ids": ids, "vs_currencies": "usd", "include_24hr_change": "true"}
     return requests.get(url, params=params).json()
 
-def build_prices_block(market):
+def build_prices_block():
+    market = fetch_market_data()
     lines = ["💰 *Текущие цены и изменение за 24ч:*"]
     for coin_id, symbol in COINS:
         price = market.get(coin_id, {}).get("usd", None)
@@ -35,8 +36,7 @@ def build_prices_block(market):
     return "\n".join(lines)
 
 def send_prices_block():
-    market = fetch_market_data()
-    prices_block = build_prices_block(market)
+    prices_block = build_prices_block()
     requests.post(TG_API, data={
         "chat_id": CHAT_ID,
         "text": prices_block,
