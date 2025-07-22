@@ -1,0 +1,29 @@
+name: Crypto Report Scheduler
+
+on:
+  schedule:
+    - cron: '0 8 * * *'   # 11:00 по Минску
+    - cron: '0 20 * * *'  # 23:00 по Минску
+  workflow_dispatch:
+
+jobs:
+  send_report:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: pip install -r requirements.txt
+
+    - name: Run script
+      env:
+        BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        CHAT_ID: ${{ secrets.CHAT_ID }}
+      run: python main.py
