@@ -1,108 +1,179 @@
 import os
 import requests
-import time
 from datetime import datetime, timedelta
 import pytz
 
-TOKENS = ['BTC', 'ETH', 'ARB', 'SOL', 'APT', 'DOT', 'W', 'HFT', 'LTC', 'ATOM', 'ONDO']
-COINGECKO_IDS = {
-    'BTC': 'bitcoin', 'ETH': 'ethereum', 'ARB': 'arbitrum', 'SOL': 'solana',
-    'APT': 'aptos', 'DOT': 'polkadot', 'W': 'wormhole', 'HFT': 'hashflow',
-    'LTC': 'litecoin', 'ATOM': 'cosmos', 'ONDO': 'ondo-finance'
-}
+# --- Настройки монет и названий ---
+COINS = [
+    ('bitcoin', 'BTC'),
+    ('ethereum', 'ETH'),
+    ('arbitrum', 'ARB'),
+    ('solana', 'SOL'),
+    ('aptos', 'APT'),
+    ('polkadot', 'DOT'),
+    ('wormhole', 'W'),
+    ('hashflow', 'HFT'),
+    ('litecoin', 'LTC'),
+    ('cosmos', 'ATOM'),
+    ('ondo-finance', 'ONDO')
+]
 
-CHAT_ID = os.getenv("CHAT_ID")
+# --- Telegram настройки ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+CHAT_ID = os.getenv("CHAT_ID")
+TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-# Получение текущих цен
-def fetch_current_prices():
-    ids = ','.join(COINGECKO_IDS.values())
-    url = f"https://api.coingecko.com/api/v3/simple/price?ids={ids}&vs_currencies=usd"
-    res = requests.get(url)
-    data = res.json()
-    return {symbol: data[COINGECKO_IDS[symbol]]['usd'] for symbol in TOKENS}
+# --- Время для Минска ---
+MINSK_TZ = pytz.timezone('Europe/Minsk')
+now = datetime.now(MINSK_TZ)
 
-# Получение исторических данных для анализа скачков
-def fetch_historical(symbol_id, hours_ago):
-    now = int(time.time())
-    past = now - hours_ago * 3600
-    url = f"https://api.coingecko.com/api/v3/coins/{symbol_id}/market_chart/range?vs_currency=usd&from={past}&to={now}"
-    res = requests.get(url)
-    if res.status_code != 200:
+# --- Получение цен, изменений, SMA и истории ---
+def fetch_market_data():
+    ids = ','.join([coin[0] for coin in COINS])
+    url = f"https://api.coingecko.com/api/v3/simple/price"
+    params = {
+        "ids": ids,
+        "vs_currencies": "usd",
+        "include_24hr_change": "true"
+    }
+    data = requests.get(url, params=params).json()
+    return data
+
+def fetch_historical(coin_id, days=7):
+    # Получаем цену за последние 7 дней по часам
+    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+    params = {"vs_currency": "usd", "days": days, "interval": "hourly"}
+    data = requests.get(url, params=params).json()
+    prices = [p[1] for p in data.get("prices",[])]
+    timestamps = [p[0] for p in data.get("prices",[])]
+    return prices, timestamps
+
+def sma(prices, period=24):
+    if len(prices) < period:
         return None
-    prices = res.json().get('prices', [])
-    return prices
+    return sum(prices[-period:]) / period
 
-# Расчёт % изменения цены
-def calculate_price_change(prices):
-    if not prices or len(prices) < 2:
-        return 0
-    start_price = prices[0][1]
-    end_price = prices[-1][1]
-    if start_price == 0:
-        return 0
-    return ((end_price - start_price) / start_price) * 100
-
-# Получение доминации BTC
+# --- Доминация BTC ---
 def fetch_btc_dominance():
     try:
         res = requests.get("https://api.coingecko.com/api/v3/global")
-        btc_dominance = res.json()['data']['market_cap_percentage']['btc']
-        return btc_dominance
+        btc_dom = res.json()['data']['market_cap_percentage']['btc']
+        return btc_dom
     except:
         return None
 
-# Генерация текста отчёта
-def generate_report(prices, spikes, dominance):
-    now = datetime.now(pytz.timezone("Europe/Minsk")).strftime("%d.%m.%Y %H:%M")
-    lines = [f"📊 *Криптоотчёт на {now}* (время Минск)\n"]
+# --- Новости и X (Twitter)/CryptoPanic ---
+def fetch_news():
+    try:
+        url = "https://cryptopanic.com/api/v1/posts/?auth_token=demo&currencies=BTC,ETH,ARB,SOL,APT,DOT,W,HFT,LTC,ATOM,ONDO&public=true"
+        res = requests.get(url)
+        items = res.json().get("results", [])
+        news = []
+        for item in items[:3]:  # максимум 3 коротких новости
+            if item.get("title"):
+                news.append(f"— {item['title']}")
+        return news
+    except:
+        return []
 
-    lines.append("💰 *Текущие цены:*")
-    for symbol in TOKENS:
-        lines.append(f"{symbol}: ${prices[symbol]:,.2f}")
+# --- Анализ уровней поддержки/сопротивления (простые экстремумы) ---
+def get_levels(prices):
+    if len(prices) < 2:
+        return None, None
+    support = min(prices)
+    resistance = max(prices)
+    return round(support, 2), round(resistance, 2)
 
-    if dominance is not None:
-        lines.append(f"\n📈 Доминация BTC: {dominance:.2f}%")
+# --- Анализ скачков ---
+def analyze_jumps(prices, period_hours, threshold):
+    if len(prices) < period_hours+1:
+        return 0
+    start = prices[-period_hours-1]
+    end = prices[-1]
+    pct = 100 * (end - start) / start if start else 0
+    return pct
 
-    if spikes:
-        lines.append("\n⚡ *Резкие движения цен:*")
-        for entry in spikes:
-            lines.append(entry)
+# --- Главная функция формирования отчёта ---
+def build_report():
+    dt = now.strftime('%d.%m.%Y %H:%M')
+    report = [f"📊 Криптоотчёт на {dt} (время Минск)\n"]
 
-    lines.append("\n⚠️ Это не финансовый совет.")
-    return '\n'.join(lines)
+    # Цены, проценты, прогноз, уровни
+    market = fetch_market_data()
+    report.append("💰 Текущие цены (и изменение за 24ч):")
+    for coin_id, symbol in COINS:
+        price = market.get(coin_id, {}).get("usd", None)
+        change = market.get(coin_id, {}).get("usd_24h_change", 0.0)
+        # Исторические цены
+        hist, _ = fetch_historical(coin_id, 7)
+        # Прогноз (SMA + направление)
+        forecast = "—"
+        if hist and len(hist) >= 168:  # 7 дней*24ч
+            avg = sma(hist, 24)
+            direction = "↑" if hist[-1] > avg else "↓"
+            forecast = f"{direction} SMA7дн: ${avg:.2f}"
+        # Уровни
+        support, resistance = get_levels(hist[-168:]) if hist else (None, None)
+        arrow = "🔺" if change > 0 else "🔻"
+        change_txt = f"{arrow}{abs(change):.2f}%"
+        support_txt = f"Поддержка: ${support}" if support else ""
+        resistance_txt = f"Сопротивление: ${resistance}" if resistance else ""
+        report.append(
+            f"{symbol}: ${price:,.2f} ({change_txt}) | {forecast} | {support_txt} {resistance_txt}"
+        )
 
-# Отправка отчёта в Telegram
-def send_to_telegram(text):
-    requests.post(TELEGRAM_API, data={
+    # Доминация BTC
+    dom = fetch_btc_dominance()
+    if dom:
+        report.append(f"\n📈 Доминация BTC: {dom:.2f}%")
+
+    # Анализ скачков
+    jump_lines = []
+    for coin_id, symbol in COINS:
+        hist, _ = fetch_historical(coin_id, 1)
+        pct_1h = analyze_jumps(hist, 1, 10)
+        if abs(pct_1h) >= 10:
+            jump_lines.append(f"{symbol}: {'🔺' if pct_1h>0 else '🔻'}{pct_1h:.2f}% за 1ч 🚨")
+        hist4, _ = fetch_historical(coin_id, 4)
+        pct_4h = analyze_jumps(hist4, 4, 5)
+        if abs(pct_4h) >= 5:
+            jump_lines.append(f"{symbol}: {'🔺' if pct_4h>0 else '🔻'}{pct_4h:.2f}% за 4ч")
+    if jump_lines:
+        report.append("\n⚡️ Резкие скачки цен за 1ч и 4ч:")
+        report += jump_lines
+
+    # Новости
+    news = fetch_news()
+    if news:
+        report.append("\n📰 Последние надёжные новости и сигналы:")
+        report += news
+
+    # Ликвидации (псевдо-уровни)
+    report.append("\n🔑 Ключевые уровни ликвидаций (по волатильности):")
+    for coin_id, symbol in COINS:
+        hist, _ = fetch_historical(coin_id, 7)
+        if hist and len(hist) > 48:
+            # Примитивная оценка: максимум/минимум дня/недели
+            week_min = min(hist[-168:])
+            week_max = max(hist[-168:])
+            day_min = min(hist[-24:])
+            day_max = max(hist[-24:])
+            report.append(f"{symbol}: день [{day_min:.2f} — {day_max:.2f}], неделя [{week_min:.2f} — {week_max:.2f}]")
+
+    report.append("\n⚠️ Это не финансовый совет.")
+    return "\n".join(report)
+
+# --- Telegram отправка ---
+def send_report(text):
+    requests.post(TG_API, data={
         "chat_id": CHAT_ID,
         "text": text,
         "parse_mode": "Markdown"
     })
 
-# Главная функция
 def main():
-    try:
-        prices = fetch_current_prices()
-        spikes = []
-        for symbol in TOKENS:
-            cid = COINGECKO_IDS[symbol]
-            hist_4h = fetch_historical(cid, 4)
-            change_4h = calculate_price_change(hist_4h)
-            if abs(change_4h) >= 5:
-                spikes.append(f"{symbol}: {change_4h:+.2f}% за 4ч")
-
-            hist_1h = fetch_historical(cid, 1)
-            change_1h = calculate_price_change(hist_1h)
-            if abs(change_1h) >= 10:
-                spikes.append(f"{symbol}: {change_1h:+.2f}% за 1ч")
-
-        dominance = fetch_btc_dominance()
-        report = generate_report(prices, spikes, dominance)
-        send_to_telegram(report)
-    except Exception as e:
-        send_to_telegram(f"❌ Ошибка в отчёте: {str(e)}")
+    report = build_report()
+    send_report(report)
 
 if __name__ == "__main__":
     main()
